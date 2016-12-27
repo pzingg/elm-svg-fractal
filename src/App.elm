@@ -24,16 +24,13 @@ type alias CalcResult =
     }
 
 
-type Pythagoras
-    = Pythagoras
-        { branch : Branch
-        , lvl : Int
-        , x : Float
-        , y : Float
-        , w : Float
-        , left : Maybe Pythagoras
-        , right : Maybe Pythagoras
-        }
+type alias Pythagoras =
+    { branch : Branch
+    , lvl : Int
+    , x : Float
+    , y : Float
+    , w : Float
+    }
 
 
 type alias Model =
@@ -41,7 +38,6 @@ type alias Model =
     , lean : Float
     , currentMax : Int
     , memoizedCalcs : Dict String CalcResult
-    , tree : Maybe Pythagoras
     }
 
 
@@ -51,7 +47,6 @@ initModel =
     , lean = 0
     , currentMax = 0
     , memoizedCalcs = Dict.empty
-    , tree = Nothing
     }
 
 
@@ -206,7 +201,7 @@ next model =
                 Process.sleep (500 * millisecond)
                     |> Task.attempt (\_ -> Next)
         in
-            ( buildTree nextModel, sleepNext )
+            ( growTree 0 baseWidth nextModel, sleepNext )
     else
         ( model, Cmd.none )
 
@@ -225,7 +220,7 @@ mouseMoved x y model =
         nextModel =
             { model | heightFactor = scaleFactor (toFloat y), lean = scaleLean (toFloat x) }
     in
-        ( buildTree nextModel, Cmd.none )
+        ( growTree 0 baseWidth nextModel, Cmd.none )
 
 
 
@@ -264,77 +259,27 @@ update msg model =
 -- FRACTAL DATA
 
 
-buildTree : Model -> Model
-buildTree model =
-    let
-        ( model_, fullTree ) =
-            growTree ( { model | tree = Nothing }, initTree model )
-    in
-        { model_ | tree = fullTree }
-
-
-{-| 0-depth fractal data
+{-| Moemoize n+1-depth fractal calculations
 -}
-initTree : Model -> Pythagoras
-initTree model =
-    Pythagoras
-        { branch = None
-        , lvl = 0
-        , x = (svgWidth - baseWidth) / 2
-        , y = svgHeight - baseWidth
-        , w = baseWidth
-        , left = Nothing
-        , right = Nothing
-        }
-
-
-{-| n+1-depth fractal data
--}
-growTree : ( Model, Pythagoras ) -> ( Model, Maybe Pythagoras )
-growTree ( model, Pythagoras pyt ) =
-    if pyt.lvl >= model.currentMax || pyt.w < 1 then
-        ( model, Just <| Pythagoras pyt )
+growTree : Int -> Float -> Model -> Model
+growTree lvl w model =
+    if lvl >= model.currentMax || w < 1 then
+        model
     else
         let
             ( model1, result ) =
                 -- lookup or create cached calculation
-                memoizedCalc pyt.w model.heightFactor model.lean model
+                memoizedCalc w model.heightFactor model.lean model
 
-            ( model2, left ) =
+            model2 =
                 -- recursive descent of left child
-                growTree
-                    ( model1
-                    , Pythagoras
-                        { branch = Left
-                        , lvl = pyt.lvl + 1
-                        , x = 0
-                        , y = -result.nextLeft
-                        , w = result.nextLeft
-                        , left = Nothing
-                        , right = Nothing
-                        }
-                    )
+                growTree (lvl + 1) result.nextLeft model1
 
-            ( model3, right ) =
+            model3 =
                 -- recursive descent of right child
-                growTree
-                    ( model2
-                    , Pythagoras
-                        { branch = Right
-                        , lvl = pyt.lvl + 1
-                        , x = pyt.w - result.nextRight
-                        , y = -result.nextRight
-                        , w = result.nextRight
-                        , left = Nothing
-                        , right = Nothing
-                        }
-                    )
-
-            -- update parent
-            pyt_ =
-                { pyt | left = left, right = right }
+                growTree (lvl + 1) result.nextRight model2
         in
-            ( model3, Just (Pythagoras pyt_) )
+            model3
 
 
 
@@ -357,16 +302,23 @@ view model =
 
 viewTree : Model -> List (Svg Msg)
 viewTree model =
-    case model.tree of
-        Nothing ->
-            []
+    if model.currentMax == 0 then
+        []
+    else
+        let
+            pyt =
+                { branch = None
+                , lvl = 0
+                , x = (svgWidth - baseWidth) / 2
+                , y = svgHeight - baseWidth
+                , w = baseWidth
+                }
+        in
+            viewPythagoras pyt model
 
-        Just pyt ->
-            [ viewPythagoras pyt model ]
 
-
-viewPythagoras : Pythagoras -> Model -> Svg Msg
-viewPythagoras (Pythagoras pyt) model =
+viewPythagoras : Pythagoras -> Model -> List (Svg Msg)
+viewPythagoras pyt model =
     let
         key =
             memoKey pyt.w model.heightFactor model.lean
@@ -376,23 +328,23 @@ viewPythagoras (Pythagoras pyt) model =
     in
         case result of
             Nothing ->
-                g [] []
+                []
 
             Just r ->
                 -- recursive descent of fractal model
-                viewPythagoras_ r (Pythagoras pyt) model
+                [ viewPythagoras_ r pyt model ]
 
 
 viewPythagoras_ : CalcResult -> Pythagoras -> Model -> Svg Msg
-viewPythagoras_ r (Pythagoras pyt) model =
+viewPythagoras_ result pyt model =
     let
         rotate =
             case pyt.branch of
                 Left ->
-                    " rotate(" ++ (toString -r.a) ++ " 0 " ++ (toString pyt.w) ++ ")"
+                    " rotate(" ++ (toString -result.a) ++ " 0 " ++ (toString pyt.w) ++ ")"
 
                 Right ->
-                    " rotate(" ++ (toString r.b) ++ " " ++ (toString pyt.w) ++ " " ++ (toString pyt.w) ++ ")"
+                    " rotate(" ++ (toString result.b) ++ " " ++ (toString pyt.w) ++ " " ++ (toString pyt.w) ++ ")"
 
                 None ->
                     ""
@@ -400,23 +352,35 @@ viewPythagoras_ r (Pythagoras pyt) model =
         xform =
             "translate(" ++ (toString pyt.x) ++ " " ++ (toString pyt.y) ++ ")" ++ rotate
 
-        childLeft =
-            case pyt.left of
-                Nothing ->
-                    []
+        l =
+            { branch = Left
+            , lvl = pyt.lvl + 1
+            , x = 0
+            , y = -result.nextLeft
+            , w = result.nextLeft
+            }
 
-                Just l ->
-                    -- recursive descent of left child
-                    [ viewPythagoras l model ]
+        childLeft =
+            if l.lvl >= model.currentMax || l.w < 1 then
+                []
+            else
+                -- recursive descent of left child
+                viewPythagoras l model
+
+        r =
+            { branch = Right
+            , lvl = pyt.lvl + 1
+            , x = pyt.w - result.nextRight
+            , y = -result.nextRight
+            , w = result.nextRight
+            }
 
         childRight =
-            case pyt.right of
-                Nothing ->
-                    []
-
-                Just r ->
-                    -- recursive descent of right child
-                    [ viewPythagoras r model ]
+            if r.lvl >= model.currentMax || r.w < 1 then
+                []
+            else
+                -- recursive descent of right child
+                viewPythagoras r model
 
         fillColor =
             interpolateColor ((toFloat pyt.lvl) / (toFloat model.currentMax)) viridis
